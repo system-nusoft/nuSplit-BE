@@ -3,14 +3,27 @@ import {
   NotFoundException,
   ForbiddenException,
   ConflictException,
+  BadRequestException,
 } from '@nestjs/common';
+import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
+import { CurrencyService } from '../currency/currency.service';
 import { CreateGroupDto } from './dto/create-group.dto';
+import { CreateSettlementDto } from './dto/create-settlement.dto';
 import { v4 as uuidv4 } from 'uuid';
+
+interface MemberInfo {
+  id: string;
+  name: string | null;
+  email: string;
+}
 
 @Injectable()
 export class GroupsService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly currencyService: CurrencyService,
+  ) {}
 
   async createGroup(userId: string, dto: CreateGroupDto) {
     return this.prisma.$transaction(async (tx) => {
@@ -19,6 +32,7 @@ export class GroupsService {
           name: dto.name,
           emoji: dto.emoji,
           avatarColor: dto.avatarColor ?? '#6366f1',
+          baseCurrency: dto.baseCurrency ?? 'USD',
           createdById: userId,
         },
       });
@@ -77,6 +91,7 @@ export class GroupsService {
       name: group.name,
       emoji: group.emoji,
       avatarColor: group.avatarColor,
+      baseCurrency: group.baseCurrency,
       createdById: group.createdById,
       createdAt: group.createdAt,
       members: group.members.map((m) => ({
@@ -86,6 +101,24 @@ export class GroupsService {
         joinedAt: m.joinedAt,
       })),
     };
+  }
+
+  async updateGroup(userId: string, groupId: string, dto: Partial<{ name: string; emoji: string; avatarColor: string; baseCurrency: string }>) {
+    const group = await this.prisma.group.findUniqueOrThrow({ where: { id: groupId } });
+    if (group.createdById !== userId) throw new ForbiddenException('Only the group creator can edit group settings');
+
+    const updated = await this.prisma.group.update({
+      where: { id: groupId },
+      data: {
+        ...(dto.name && { name: dto.name }),
+        ...(dto.emoji !== undefined && { emoji: dto.emoji || null }),
+        ...(dto.avatarColor && { avatarColor: dto.avatarColor }),
+        ...(dto.baseCurrency && { baseCurrency: dto.baseCurrency.toUpperCase() }),
+      },
+    });
+
+    const memberCount = await this.prisma.groupMember.count({ where: { groupId } });
+    return this.formatGroup(updated, memberCount);
   }
 
   async createInvite(userId: string, groupId: string) {
@@ -145,6 +178,215 @@ export class GroupsService {
     };
   }
 
+  async getBalances(userId: string, groupId: string) {
+    await this.assertMember(userId, groupId);
+
+    const group = await this.prisma.group.findUniqueOrThrow({
+      where: { id: groupId },
+      select: { baseCurrency: true },
+    });
+
+    const [expenses, settlements, members] = await Promise.all([
+      this.prisma.expense.findMany({
+        where: { groupId },
+        include: { splits: true },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.settlement.findMany({
+        where: { groupId },
+        include: {
+          from: { select: { id: true, name: true, email: true } },
+          to: { select: { id: true, name: true, email: true } },
+        },
+        orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.groupMember.findMany({
+        where: { groupId },
+        include: { user: { select: { id: true, name: true, email: true } } },
+      }),
+    ]);
+
+    // Net balance per person: positive = owed money, negative = owes money
+    const net = new Map<string, number>();
+    for (const m of members) net.set(m.userId, 0);
+
+    // Pre-fetch FX rates for cross-currency expenses and settlements
+    const rateCache = new Map<string, number>();
+    const needsRate = (currency: string) =>
+      currency !== group.baseCurrency && !rateCache.has(`${currency}:${group.baseCurrency}`);
+
+    for (const expense of expenses) {
+      if (!expense.amountInBase && needsRate(expense.currency)) {
+        const key = `${expense.currency}:${group.baseCurrency}`;
+        rateCache.set(key, await this.currencyService.getRate(expense.currency, group.baseCurrency));
+      }
+    }
+    for (const s of settlements) {
+      if (needsRate(s.currency)) {
+        const key = `${s.currency}:${group.baseCurrency}`;
+        rateCache.set(key, await this.currencyService.getRate(s.currency, group.baseCurrency));
+      }
+    }
+
+    for (const expense of expenses) {
+      const expenseTotal = parseFloat(expense.amount.toString());
+      let baseTotal: number;
+      if (expense.amountInBase) {
+        baseTotal = parseFloat(expense.amountInBase.toString());
+      } else if (expense.currency !== group.baseCurrency) {
+        const rate = rateCache.get(`${expense.currency}:${group.baseCurrency}`) ?? 1;
+        baseTotal = expenseTotal * rate;
+      } else {
+        baseTotal = expenseTotal;
+      }
+      const scale = expenseTotal > 0 ? baseTotal / expenseTotal : 1;
+
+      for (const split of expense.splits) {
+        if (split.userId === expense.paidById) continue;
+        const amountInBase = parseFloat(split.amountOwed.toString()) * scale;
+        net.set(expense.paidById, (net.get(expense.paidById) ?? 0) + amountInBase);
+        net.set(split.userId, (net.get(split.userId) ?? 0) - amountInBase);
+      }
+    }
+
+    for (const s of settlements) {
+      let amount = parseFloat(s.amount.toString());
+      if (s.currency !== group.baseCurrency) {
+        amount *= rateCache.get(`${s.currency}:${group.baseCurrency}`) ?? 1;
+      }
+      net.set(s.fromUserId, (net.get(s.fromUserId) ?? 0) + amount);
+      net.set(s.toUserId, (net.get(s.toUserId) ?? 0) - amount);
+    }
+
+    const memberMap = new Map<string, MemberInfo>(
+      members.map((m) => [m.userId, m.user]),
+    );
+
+    const balances = members.map((m) => ({
+      userId: m.userId,
+      name: m.user.name,
+      email: m.user.email,
+      amount: Math.round((net.get(m.userId) ?? 0) * 100) / 100,
+    }));
+
+    return {
+      balances,
+      simplifiedTransactions: this.simplifyDebts(net, memberMap),
+      settlements: settlements.map((s) => ({
+        id: s.id,
+        fromUserId: s.fromUserId,
+        fromName: s.from.name ?? s.from.email,
+        toUserId: s.toUserId,
+        toName: s.to.name ?? s.to.email,
+        amount: s.amount,
+        currency: s.currency,
+        note: s.note,
+        createdAt: s.createdAt,
+      })),
+    };
+  }
+
+  async createSettlement(userId: string, groupId: string, dto: CreateSettlementDto) {
+    await this.assertMember(userId, groupId);
+    await this.assertMember(dto.toUserId, groupId);
+
+    if (userId === dto.toUserId) {
+      throw new BadRequestException('Cannot settle up with yourself');
+    }
+
+    const amount = parseFloat(dto.amount);
+    if (amount <= 0) throw new BadRequestException('Amount must be greater than 0');
+
+    const group = await this.prisma.group.findUniqueOrThrow({
+      where: { id: groupId },
+      select: { baseCurrency: true },
+    });
+
+    const settlement = await this.prisma.settlement.create({
+      data: {
+        groupId,
+        fromUserId: userId,
+        toUserId: dto.toUserId,
+        amount: new Decimal(dto.amount),
+        currency: dto.currency ?? group.baseCurrency,
+        note: dto.note,
+      },
+      include: {
+        from: { select: { id: true, name: true, email: true } },
+        to: { select: { id: true, name: true, email: true } },
+      },
+    });
+
+    return settlement;
+  }
+
+  async getSettlements(userId: string, groupId: string) {
+    await this.assertMember(userId, groupId);
+
+    return this.prisma.settlement.findMany({
+      where: { groupId },
+      include: {
+        from: { select: { id: true, name: true, email: true } },
+        to: { select: { id: true, name: true, email: true } },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  private simplifyDebts(
+    net: Map<string, number>,
+    memberMap: Map<string, MemberInfo>,
+  ) {
+    const creditors: { id: string; amount: number }[] = [];
+    const debtors: { id: string; amount: number }[] = [];
+
+    for (const [id, amount] of net) {
+      const rounded = Math.round(amount * 100) / 100;
+      if (rounded > 0.005) creditors.push({ id, amount: rounded });
+      else if (rounded < -0.005) debtors.push({ id, amount: -rounded });
+    }
+
+    creditors.sort((a, b) => b.amount - a.amount);
+    debtors.sort((a, b) => b.amount - a.amount);
+
+    const transactions: {
+      fromUserId: string;
+      fromName: string;
+      toUserId: string;
+      toName: string;
+      amount: number;
+    }[] = [];
+
+    let ci = 0;
+    let di = 0;
+
+    while (ci < creditors.length && di < debtors.length) {
+      const credit = creditors[ci];
+      const debt = debtors[di];
+      const amount = Math.min(credit.amount, debt.amount);
+
+      if (amount > 0.005) {
+        const from = memberMap.get(debt.id)!;
+        const to = memberMap.get(credit.id)!;
+        transactions.push({
+          fromUserId: debt.id,
+          fromName: from.name ?? from.email,
+          toUserId: credit.id,
+          toName: to.name ?? to.email,
+          amount: Math.round(amount * 100) / 100,
+        });
+      }
+
+      credit.amount = Math.round((credit.amount - amount) * 100) / 100;
+      debt.amount = Math.round((debt.amount - amount) * 100) / 100;
+
+      if (credit.amount < 0.005) ci++;
+      if (debt.amount < 0.005) di++;
+    }
+
+    return transactions;
+  }
+
   private async assertMember(userId: string, groupId: string) {
     const member = await this.prisma.groupMember.findUnique({
       where: { groupId_userId: { groupId, userId } },
@@ -152,12 +394,13 @@ export class GroupsService {
     if (!member) throw new ForbiddenException('You are not a member of this group');
   }
 
-  private formatGroup(group: { id: string; name: string; emoji: string | null; avatarColor: string; createdById: string; createdAt: Date }, memberCount: number) {
+  private formatGroup(group: { id: string; name: string; emoji: string | null; avatarColor: string; baseCurrency: string; createdById: string; createdAt: Date }, memberCount: number) {
     return {
       id: group.id,
       name: group.name,
       emoji: group.emoji,
       avatarColor: group.avatarColor,
+      baseCurrency: group.baseCurrency,
       createdById: group.createdById,
       createdAt: group.createdAt,
       memberCount,

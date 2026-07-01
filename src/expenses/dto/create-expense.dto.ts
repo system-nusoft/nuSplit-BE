@@ -52,4 +52,12 @@ export class CreateExpenseDto {
   @ValidateNested({ each: true })
   @Type(() => SplitParticipantDto)
   participants: SplitParticipantDto[];
+
+  @IsOptional()
+  @IsNumber()
+  exchangeRate?: number;
+
+  @IsOptional()
+  @IsDecimal({ decimal_digits: '0,2' })
+  amountInBase?: string;
 }

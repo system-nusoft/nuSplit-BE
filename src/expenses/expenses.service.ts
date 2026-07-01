@@ -6,8 +6,11 @@ import {
 } from '@nestjs/common';
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
+import { AiService } from '../ai/ai.service';
+import { CurrencyService } from '../currency/currency.service';
 import { CreateExpenseDto, SplitMethod, SplitParticipantDto } from './dto/create-expense.dto';
 import { UpdateExpenseDto } from './dto/update-expense.dto';
+import { CreateCommentDto } from './dto/create-comment.dto';
 
 interface SplitResult {
   userId: string;
@@ -17,7 +20,18 @@ interface SplitResult {
 
 @Injectable()
 export class ExpensesService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly aiService: AiService,
+    private readonly currencyService: CurrencyService,
+  ) {}
+
+  async scanReceipt(userId: string, groupId: string, file: Express.Multer.File) {
+    await this.assertMember(userId, groupId);
+    if (!file) throw new BadRequestException('No receipt file provided');
+    const imageBase64 = file.buffer.toString('base64');
+    return this.aiService.scanReceipt(imageBase64, file.mimetype);
+  }
 
   async createExpense(userId: string, groupId: string, dto: CreateExpenseDto) {
     await this.assertMember(userId, groupId);
@@ -28,6 +42,23 @@ export class ExpensesService {
 
     const splits = this.computeSplits(dto.splitMethod, dto.participants, totalCents);
 
+    // Resolve FX: use caller-supplied rate or auto-fetch from group baseCurrency
+    const group = await this.prisma.group.findUniqueOrThrow({
+      where: { id: groupId },
+      select: { baseCurrency: true },
+    });
+    const expenseCurrency = dto.currency ?? 'USD';
+    let exchangeRate: number;
+    let amountInBase: number;
+
+    if (dto.exchangeRate !== undefined && dto.amountInBase !== undefined) {
+      exchangeRate = dto.exchangeRate;
+      amountInBase = parseFloat(dto.amountInBase);
+    } else {
+      exchangeRate = await this.currencyService.getRate(expenseCurrency, group.baseCurrency);
+      amountInBase = parseFloat(dto.amount) * exchangeRate;
+    }
+
     const { id: expenseId } = await this.prisma.$transaction(async (tx) => {
       const expense = await tx.expense.create({
         data: {
@@ -35,7 +66,9 @@ export class ExpensesService {
           paidById: dto.paidById,
           description: dto.description,
           amount: new Decimal(dto.amount),
-          currency: dto.currency ?? 'USD',
+          currency: expenseCurrency,
+          exchangeRate: new Decimal(exchangeRate),
+          amountInBase: new Decimal(amountInBase.toFixed(2)),
           splitMethod: dto.splitMethod,
         },
       });
@@ -135,6 +168,39 @@ export class ExpensesService {
     const expense = await this.prisma.expense.findFirst({ where: { id: expenseId, groupId } });
     if (!expense) throw new NotFoundException('Expense not found');
     await this.prisma.expense.delete({ where: { id: expenseId } });
+  }
+
+  async createComment(userId: string, groupId: string, expenseId: string, dto: CreateCommentDto) {
+    await this.assertMember(userId, groupId);
+    const expense = await this.prisma.expense.findFirst({ where: { id: expenseId, groupId } });
+    if (!expense) throw new NotFoundException('Expense not found');
+
+    return this.prisma.comment.create({
+      data: { expenseId, userId, body: dto.body },
+      include: { user: { select: { id: true, name: true, email: true } } },
+    });
+  }
+
+  async getComments(userId: string, groupId: string, expenseId: string) {
+    await this.assertMember(userId, groupId);
+    const expense = await this.prisma.expense.findFirst({ where: { id: expenseId, groupId } });
+    if (!expense) throw new NotFoundException('Expense not found');
+
+    return this.prisma.comment.findMany({
+      where: { expenseId },
+      include: { user: { select: { id: true, name: true, email: true } } },
+      orderBy: { createdAt: 'asc' },
+    });
+  }
+
+  async deleteComment(userId: string, groupId: string, expenseId: string, commentId: string) {
+    await this.assertMember(userId, groupId);
+    const comment = await this.prisma.comment.findFirst({
+      where: { id: commentId, expenseId },
+    });
+    if (!comment) throw new NotFoundException('Comment not found');
+    if (comment.userId !== userId) throw new ForbiddenException('Cannot delete someone else\'s comment');
+    await this.prisma.comment.delete({ where: { id: commentId } });
   }
 
   private async getExpense(groupId: string, expenseId: string) {

@@ -13,4 +13,9 @@ export class CreateGroupDto {
   @IsOptional()
   @IsString()
   avatarColor?: string;
+
+  @IsOptional()
+  @IsString()
+  @MaxLength(3)
+  baseCurrency?: string;
 }

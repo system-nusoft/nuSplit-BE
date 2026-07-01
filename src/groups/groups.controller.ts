@@ -2,6 +2,7 @@ import {
   Controller,
   Post,
   Get,
+  Patch,
   Body,
   Param,
   UseGuards,
@@ -10,6 +11,7 @@ import {
 } from '@nestjs/common';
 import { GroupsService } from './groups.service';
 import { CreateGroupDto } from './dto/create-group.dto';
+import { CreateSettlementDto } from './dto/create-settlement.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { CurrentUser } from '../auth/decorators/current-user.decorator';
 
@@ -47,6 +49,16 @@ export class GroupsController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Patch(':id')
+  async updateGroup(
+    @CurrentUser() user: AuthUser,
+    @Param('id') groupId: string,
+    @Body() dto: Partial<CreateGroupDto>,
+  ) {
+    return this.groupsService.updateGroup(user.id, groupId, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Post(':id/invite')
   async createInvite(@CurrentUser() user: AuthUser, @Param('id') groupId: string) {
     return this.groupsService.createInvite(user.id, groupId);
@@ -57,5 +69,27 @@ export class GroupsController {
   @HttpCode(HttpStatus.OK)
   async acceptInvite(@CurrentUser() user: AuthUser, @Param('token') token: string) {
     return this.groupsService.acceptInvite(user.id, token);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/balances')
+  async getBalances(@CurrentUser() user: AuthUser, @Param('id') groupId: string) {
+    return this.groupsService.getBalances(user.id, groupId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/settlements')
+  async createSettlement(
+    @CurrentUser() user: AuthUser,
+    @Param('id') groupId: string,
+    @Body() dto: CreateSettlementDto,
+  ) {
+    return this.groupsService.createSettlement(user.id, groupId, dto);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Get(':id/settlements')
+  async getSettlements(@CurrentUser() user: AuthUser, @Param('id') groupId: string) {
+    return this.groupsService.getSettlements(user.id, groupId);
   }
 }
