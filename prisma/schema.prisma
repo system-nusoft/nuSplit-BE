@@ -119,17 +119,19 @@ model ExpenseSplit {
 }
 
 model Settlement {
-  id         String   @id @default(cuid())
+  id         String           @id @default(cuid())
   groupId    String
-  group      Group    @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  group      Group            @relation(fields: [groupId], references: [id], onDelete: Cascade)
   fromUserId String
-  from       User     @relation("SettlementFrom", fields: [fromUserId], references: [id])
+  from       User             @relation("SettlementFrom", fields: [fromUserId], references: [id])
   toUserId   String
-  to         User     @relation("SettlementTo", fields: [toUserId], references: [id])
-  amount     Decimal  @db.Decimal(12, 2)
-  currency   String   @default("USD")
+  to         User             @relation("SettlementTo", fields: [toUserId], references: [id])
+  amount     Decimal          @db.Decimal(12, 2)
+  currency   String           @default("USD")
+  status     SettlementStatus @default(PENDING)
   note       String?
-  createdAt  DateTime @default(now())
+  createdAt  DateTime         @default(now())
+  confirmedAt DateTime?
 }
 
 model Comment {
@@ -147,4 +149,9 @@ enum SplitMethod {
   SHARES
   PERCENTAGE
   CUSTOM
+}
+
+enum SettlementStatus {
+  PENDING
+  CONFIRMED
 }

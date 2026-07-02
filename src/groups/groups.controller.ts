@@ -3,6 +3,7 @@ import {
   Post,
   Get,
   Patch,
+  Delete,
   Body,
   Param,
   UseGuards,
@@ -91,5 +92,45 @@ export class GroupsController {
   @Get(':id/settlements')
   async getSettlements(@CurrentUser() user: AuthUser, @Param('id') groupId: string) {
     return this.groupsService.getSettlements(user.id, groupId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Patch(':id/settlements/:settlementId/confirm')
+  @HttpCode(HttpStatus.OK)
+  async confirmSettlement(
+    @CurrentUser() user: AuthUser,
+    @Param('id') groupId: string,
+    @Param('settlementId') settlementId: string,
+  ) {
+    return this.groupsService.confirmSettlement(user.id, groupId, settlementId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete(':id/settlements/:settlementId')
+  @HttpCode(HttpStatus.OK)
+  async deleteSettlement(
+    @CurrentUser() user: AuthUser,
+    @Param('id') groupId: string,
+    @Param('settlementId') settlementId: string,
+  ) {
+    return this.groupsService.deleteSettlement(user.id, groupId, settlementId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Post(':id/remind')
+  @HttpCode(HttpStatus.OK)
+  async sendReminders(@CurrentUser() user: AuthUser, @Param('id') groupId: string) {
+    return this.groupsService.sendReminders(user.id, groupId);
+  }
+
+  @UseGuards(JwtAuthGuard)
+  @Delete(':id/members/:userId')
+  @HttpCode(HttpStatus.OK)
+  async removeMember(
+    @CurrentUser() user: AuthUser,
+    @Param('id') groupId: string,
+    @Param('userId') targetUserId: string,
+  ) {
+    return this.groupsService.removeMember(user.id, groupId, targetUserId);
   }
 }

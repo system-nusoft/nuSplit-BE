@@ -28,6 +28,39 @@ export class MailService {
     );
   }
 
+  async sendBalanceReminder(
+    email: string,
+    name: string,
+    groupName: string,
+    amount: string,
+    currency: string,
+    creditorName: string,
+  ): Promise<void> {
+    const displayName = name || email;
+    const html = `
+      <div style="font-family:Inter,sans-serif;max-width:480px;margin:0 auto;padding:32px 24px">
+        <h2 style="font-size:20px;font-weight:700;color:#111827;margin-bottom:8px">Payment reminder</h2>
+        <p style="font-size:15px;color:#374151;margin-bottom:24px">
+          Hi ${displayName},<br/><br/>
+          You owe <strong>${creditorName}</strong> <strong>${currency} ${amount}</strong> in
+          <strong>${groupName}</strong> on nuSplit.
+        </p>
+        <p style="font-size:13px;color:#9ca3af">This is an automated reminder sent by a group member.</p>
+      </div>`;
+
+    const command = new SendEmailCommand({
+      Source: `"nuSplit" <${this.from}>`,
+      Destination: { ToAddresses: [email] },
+      Message: {
+        Subject: { Data: `Reminder: You owe ${creditorName} in ${groupName}`, Charset: 'UTF-8' },
+        Body: { Html: { Data: html, Charset: 'UTF-8' } },
+      },
+    });
+
+    await this.client.send(command);
+    this.logger.log(`Balance reminder sent to ${email}`);
+  }
+
   async sendVerificationOtp(email: string, otp: string, name?: string): Promise<void> {
     const html = this.otpTemplate
       .replace(/{{displayName}}/g, name ?? email)

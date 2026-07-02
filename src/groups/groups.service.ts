@@ -8,6 +8,7 @@ import {
 import { Decimal } from '@prisma/client/runtime/library';
 import { PrismaService } from '../prisma/prisma.service';
 import { CurrencyService } from '../currency/currency.service';
+import { MailService } from '../mail/mail.service';
 import { CreateGroupDto } from './dto/create-group.dto';
 import { CreateSettlementDto } from './dto/create-settlement.dto';
 import { v4 as uuidv4 } from 'uuid';
@@ -16,6 +17,7 @@ interface MemberInfo {
   id: string;
   name: string | null;
   email: string;
+  phoneNumber: string | null;
 }
 
 @Injectable()
@@ -23,6 +25,7 @@ export class GroupsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly currencyService: CurrencyService,
+    private readonly mailService: MailService,
   ) {}
 
   async createGroup(userId: string, dto: CreateGroupDto) {
@@ -186,11 +189,18 @@ export class GroupsService {
       select: { baseCurrency: true },
     });
 
-    const [expenses, settlements, members] = await Promise.all([
+    const [expenses, confirmedSettlements, allSettlements, members] = await Promise.all([
       this.prisma.expense.findMany({
         where: { groupId },
         include: { splits: true },
         orderBy: { createdAt: 'desc' },
+      }),
+      this.prisma.settlement.findMany({
+        where: { groupId, status: 'CONFIRMED' },
+        include: {
+          from: { select: { id: true, name: true, email: true } },
+          to: { select: { id: true, name: true, email: true } },
+        },
       }),
       this.prisma.settlement.findMany({
         where: { groupId },
@@ -202,7 +212,7 @@ export class GroupsService {
       }),
       this.prisma.groupMember.findMany({
         where: { groupId },
-        include: { user: { select: { id: true, name: true, email: true } } },
+        include: { user: { select: { id: true, name: true, email: true, phoneNumber: true } } },
       }),
     ]);
 
@@ -221,7 +231,7 @@ export class GroupsService {
         rateCache.set(key, await this.currencyService.getRate(expense.currency, group.baseCurrency));
       }
     }
-    for (const s of settlements) {
+    for (const s of confirmedSettlements) {
       if (needsRate(s.currency)) {
         const key = `${s.currency}:${group.baseCurrency}`;
         rateCache.set(key, await this.currencyService.getRate(s.currency, group.baseCurrency));
@@ -249,7 +259,7 @@ export class GroupsService {
       }
     }
 
-    for (const s of settlements) {
+    for (const s of confirmedSettlements) {
       let amount = parseFloat(s.amount.toString());
       if (s.currency !== group.baseCurrency) {
         amount *= rateCache.get(`${s.currency}:${group.baseCurrency}`) ?? 1;
@@ -272,7 +282,7 @@ export class GroupsService {
     return {
       balances,
       simplifiedTransactions: this.simplifyDebts(net, memberMap),
-      settlements: settlements.map((s) => ({
+      settlements: allSettlements.map((s) => ({
         id: s.id,
         fromUserId: s.fromUserId,
         fromName: s.from.name ?? s.from.email,
@@ -280,8 +290,10 @@ export class GroupsService {
         toName: s.to.name ?? s.to.email,
         amount: s.amount,
         currency: s.currency,
+        status: s.status,
         note: s.note,
         createdAt: s.createdAt,
+        confirmedAt: s.confirmedAt,
       })),
     };
   }
@@ -333,6 +345,91 @@ export class GroupsService {
     });
   }
 
+  async confirmSettlement(userId: string, groupId: string, settlementId: string) {
+    await this.assertMember(userId, groupId);
+
+    const settlement = await this.prisma.settlement.findUniqueOrThrow({ where: { id: settlementId } });
+    if (settlement.groupId !== groupId) throw new ForbiddenException('Settlement not in this group');
+    if (settlement.toUserId !== userId) throw new ForbiddenException('Only the payment receiver can confirm');
+    if (settlement.status === 'CONFIRMED') throw new BadRequestException('Already confirmed');
+
+    return this.prisma.settlement.update({
+      where: { id: settlementId },
+      data: { status: 'CONFIRMED', confirmedAt: new Date() },
+      include: {
+        from: { select: { id: true, name: true, email: true } },
+        to: { select: { id: true, name: true, email: true } },
+      },
+    });
+  }
+
+  async deleteSettlement(userId: string, groupId: string, settlementId: string) {
+    await this.assertMember(userId, groupId);
+
+    const settlement = await this.prisma.settlement.findUniqueOrThrow({ where: { id: settlementId } });
+    if (settlement.groupId !== groupId) throw new ForbiddenException('Settlement not in this group');
+    if (settlement.fromUserId !== userId) throw new ForbiddenException('Only the payer can delete a settlement');
+    if (settlement.status === 'CONFIRMED') throw new BadRequestException('Cannot delete a confirmed settlement');
+
+    await this.prisma.settlement.delete({ where: { id: settlementId } });
+    return { success: true };
+  }
+
+  async sendReminders(userId: string, groupId: string) {
+    await this.assertMember(userId, groupId);
+
+    const group = await this.prisma.group.findUniqueOrThrow({
+      where: { id: groupId },
+      select: { name: true, baseCurrency: true },
+    });
+
+    const balancesData = await this.getBalances(userId, groupId);
+    const sender = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
+    const senderName = sender.name || sender.email;
+
+    let sent = 0;
+    for (const tx of balancesData.simplifiedTransactions) {
+      if (tx.toUserId !== userId) continue; // only send reminders where current user is the creditor
+      const debtor = await this.prisma.user.findUnique({
+        where: { id: tx.fromUserId },
+        select: { email: true, name: true },
+      });
+      if (!debtor) continue;
+      await this.mailService.sendBalanceReminder(
+        debtor.email,
+        debtor.name ?? debtor.email,
+        group.name,
+        tx.amount.toFixed(2),
+        group.baseCurrency,
+        senderName,
+      );
+      sent++;
+    }
+
+    return { sent };
+  }
+
+  async removeMember(userId: string, groupId: string, targetUserId: string) {
+    const group = await this.prisma.group.findUniqueOrThrow({ where: { id: groupId } });
+
+    const isSelf = userId === targetUserId;
+    const isCreator = group.createdById === userId;
+
+    if (!isSelf && !isCreator) throw new ForbiddenException('Only the group creator can remove members');
+    if (isCreator && isSelf) throw new BadRequestException('Group creator cannot leave the group');
+
+    await this.assertMember(targetUserId, groupId);
+
+    await this.prisma.groupMember.delete({
+      where: { groupId_userId: { groupId, userId: targetUserId } },
+    });
+
+    return { success: true };
+  }
+
   private simplifyDebts(
     net: Map<string, number>,
     memberMap: Map<string, MemberInfo>,
@@ -352,8 +449,10 @@ export class GroupsService {
     const transactions: {
       fromUserId: string;
       fromName: string;
+      fromPhone: string | null;
       toUserId: string;
       toName: string;
+      toPhone: string | null;
       amount: number;
     }[] = [];
 
@@ -371,8 +470,10 @@ export class GroupsService {
         transactions.push({
           fromUserId: debt.id,
           fromName: from.name ?? from.email,
+          fromPhone: from.phoneNumber,
           toUserId: credit.id,
           toName: to.name ?? to.email,
+          toPhone: to.phoneNumber,
           amount: Math.round(amount * 100) / 100,
         });
       }
