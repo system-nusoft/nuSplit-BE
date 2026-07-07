@@ -60,6 +60,13 @@ export class GroupsController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Delete(':id')
+  @HttpCode(HttpStatus.OK)
+  async deleteGroup(@CurrentUser() user: AuthUser, @Param('id') groupId: string) {
+    return this.groupsService.deleteGroup(user.id, groupId);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Post(':id/invite')
   async createInvite(@CurrentUser() user: AuthUser, @Param('id') groupId: string) {
     return this.groupsService.createInvite(user.id, groupId);

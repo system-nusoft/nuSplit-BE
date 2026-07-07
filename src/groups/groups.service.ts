@@ -259,13 +259,30 @@ export class GroupsService {
       }
     }
 
+    // Snapshot expense-only balances to determine the actual debtor for each settlement,
+    // regardless of whether the debtor or creditor initiated the settlement record.
+    // Also used to cap the settlement effect so it never creates a phantom balance
+    // when expenses have been deleted.
+    const expenseOnlyNet = new Map(net);
+
     for (const s of confirmedSettlements) {
       let amount = parseFloat(s.amount.toString());
       if (s.currency !== group.baseCurrency) {
         amount *= rateCache.get(`${s.currency}:${group.baseCurrency}`) ?? 1;
       }
-      net.set(s.fromUserId, (net.get(s.fromUserId) ?? 0) + amount);
-      net.set(s.toUserId, (net.get(s.toUserId) ?? 0) - amount);
+      const fromExpNet = expenseOnlyNet.get(s.fromUserId) ?? 0;
+      const toExpNet = expenseOnlyNet.get(s.toUserId) ?? 0;
+      // The actual debtor is whoever has the lower expense-only balance
+      const [debtorId, creditorId] = fromExpNet <= toExpNet
+        ? [s.fromUserId, s.toUserId]
+        : [s.toUserId, s.fromUserId];
+      // Cap at the expense-based debt so deleted expenses don't leave phantom balances
+      const debtAmount = Math.abs(Math.min(expenseOnlyNet.get(debtorId) ?? 0, 0));
+      const effectiveAmount = Math.min(amount, debtAmount);
+      if (effectiveAmount > 0) {
+        net.set(debtorId, (net.get(debtorId) ?? 0) + effectiveAmount);
+        net.set(creditorId, (net.get(creditorId) ?? 0) - effectiveAmount);
+      }
     }
 
     const memberMap = new Map<string, MemberInfo>(
@@ -410,6 +427,23 @@ export class GroupsService {
     }
 
     return { sent };
+  }
+
+  async deleteGroup(userId: string, groupId: string) {
+    const group = await this.prisma.group.findUniqueOrThrow({ where: { id: groupId } });
+    if (group.createdById !== userId) throw new ForbiddenException('Only the creator can delete this group');
+
+    await this.prisma.$transaction([
+      this.prisma.comment.deleteMany({ where: { expense: { groupId } } }),
+      this.prisma.expenseSplit.deleteMany({ where: { expense: { groupId } } }),
+      this.prisma.expense.deleteMany({ where: { groupId } }),
+      this.prisma.settlement.deleteMany({ where: { groupId } }),
+      this.prisma.groupInvite.deleteMany({ where: { groupId } }),
+      this.prisma.groupMember.deleteMany({ where: { groupId } }),
+      this.prisma.group.delete({ where: { id: groupId } }),
+    ]);
+
+    return { success: true };
   }
 
   async removeMember(userId: string, groupId: string, targetUserId: string) {
