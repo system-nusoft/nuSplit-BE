@@ -428,6 +428,48 @@ export class GroupsService {
     return { sent };
   }
 
+  async sendExpenseReminder(userId: string, groupId: string, expenseId: string) {
+    await this.assertMember(userId, groupId);
+
+    const expense = await this.prisma.expense.findFirst({
+      where: { id: expenseId, groupId },
+      include: { splits: true },
+    });
+    if (!expense) throw new NotFoundException('Expense not found');
+    if (expense.paidById !== userId) throw new ForbiddenException('Only the expense creator can send reminders');
+
+    const group = await this.prisma.group.findUniqueOrThrow({
+      where: { id: groupId },
+      select: { name: true, baseCurrency: true },
+    });
+    const sender = await this.prisma.user.findUniqueOrThrow({
+      where: { id: userId },
+      select: { name: true, email: true },
+    });
+    const senderName = sender.name || sender.email;
+
+    let sent = 0;
+    for (const split of expense.splits) {
+      if (split.userId === userId) continue;
+      const debtor = await this.prisma.user.findUnique({
+        where: { id: split.userId },
+        select: { email: true, name: true },
+      });
+      if (!debtor) continue;
+      await this.mailService.sendBalanceReminder(
+        debtor.email,
+        debtor.name ?? debtor.email,
+        group.name,
+        parseFloat(split.amountOwed.toString()).toFixed(2),
+        expense.currency,
+        senderName,
+      );
+      sent++;
+    }
+
+    return { sent };
+  }
+
   async deleteGroup(userId: string, groupId: string) {
     const group = await this.prisma.group.findUniqueOrThrow({ where: { id: groupId } });
     if (group.createdById !== userId) throw new ForbiddenException('Only the creator can delete this group');

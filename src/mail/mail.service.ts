@@ -43,13 +43,13 @@ export class MailService {
         <p style="font-size:15px;color:#374151;margin-bottom:24px">
           Hi ${displayName},<br/><br/>
           You owe <strong>${creditorName}</strong> <strong>${currency} ${amount}</strong> in
-          <strong>${groupName}</strong> on nuSplit.
+          <strong>${groupName}</strong> on Squarr.
         </p>
         <p style="font-size:13px;color:#9ca3af">This is an automated reminder sent by a group member.</p>
       </div>`;
 
     const command = new SendEmailCommand({
-      Source: `"nuSplit" <${this.from}>`,
+      Source: `"Squarr" <${this.from}>`,
       Destination: { ToAddresses: [email] },
       Message: {
         Subject: { Data: `Reminder: You owe ${creditorName} in ${groupName}`, Charset: 'UTF-8' },
@@ -68,10 +68,10 @@ export class MailService {
       .replace(/{{year}}/g, new Date().getFullYear().toString());
 
     const command = new SendEmailCommand({
-      Source: `"nuSplit" <${this.from}>`,
+      Source: `"Squarr" <${this.from}>`,
       Destination: { ToAddresses: [email] },
       Message: {
-        Subject: { Data: 'Your nuSplit verification code', Charset: 'UTF-8' },
+        Subject: { Data: 'Your Squarr verification code', Charset: 'UTF-8' },
         Body: {
           Html: { Data: html, Charset: 'UTF-8' },
         },

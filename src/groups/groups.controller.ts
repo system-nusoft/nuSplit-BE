@@ -131,6 +131,17 @@ export class GroupsController {
   }
 
   @UseGuards(JwtAuthGuard)
+  @Post(':id/expenses/:expenseId/remind')
+  @HttpCode(HttpStatus.OK)
+  async sendExpenseReminder(
+    @CurrentUser() user: AuthUser,
+    @Param('id') groupId: string,
+    @Param('expenseId') expenseId: string,
+  ) {
+    return this.groupsService.sendExpenseReminder(user.id, groupId, expenseId);
+  }
+
+  @UseGuards(JwtAuthGuard)
   @Delete(':id/members/:userId')
   @HttpCode(HttpStatus.OK)
   async removeMember(
