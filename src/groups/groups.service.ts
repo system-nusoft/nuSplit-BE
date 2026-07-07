@@ -219,6 +219,8 @@ export class GroupsService {
     // Net balance per person: positive = owed money, negative = owes money
     const net = new Map<string, number>();
     for (const m of members) net.set(m.userId, 0);
+    // Pairwise expense debt: pairwiseOwed[debtor][creditor] = total owed from expenses only
+    const pairwiseOwed = new Map<string, Map<string, number>>();
 
     // Pre-fetch FX rates for cross-currency expenses and settlements
     const rateCache = new Map<string, number>();
@@ -251,37 +253,34 @@ export class GroupsService {
       }
       const scale = expenseTotal > 0 ? baseTotal / expenseTotal : 1;
 
+      // Track pairwise: pairwiseOwed[debtor][creditor] = how much debtor owes creditor from expenses
       for (const split of expense.splits) {
         if (split.userId === expense.paidById) continue;
         const amountInBase = parseFloat(split.amountOwed.toString()) * scale;
         net.set(expense.paidById, (net.get(expense.paidById) ?? 0) + amountInBase);
         net.set(split.userId, (net.get(split.userId) ?? 0) - amountInBase);
+        if (!pairwiseOwed.has(split.userId)) pairwiseOwed.set(split.userId, new Map());
+        pairwiseOwed.get(split.userId)!.set(
+          expense.paidById,
+          (pairwiseOwed.get(split.userId)!.get(expense.paidById) ?? 0) + amountInBase,
+        );
       }
     }
 
-    // Snapshot expense-only balances to determine the actual debtor for each settlement,
-    // regardless of whether the debtor or creditor initiated the settlement record.
-    // Also used to cap the settlement effect so it never creates a phantom balance
-    // when expenses have been deleted.
-    const expenseOnlyNet = new Map(net);
-
+    // fromUserId is always the actual payer (debtor who clicked "I paid").
+    // Cap at the pairwise expense debt so phantom balances can't appear when expenses are deleted.
     for (const s of confirmedSettlements) {
       let amount = parseFloat(s.amount.toString());
       if (s.currency !== group.baseCurrency) {
         amount *= rateCache.get(`${s.currency}:${group.baseCurrency}`) ?? 1;
       }
-      const fromExpNet = expenseOnlyNet.get(s.fromUserId) ?? 0;
-      const toExpNet = expenseOnlyNet.get(s.toUserId) ?? 0;
-      // The actual debtor is whoever has the lower expense-only balance
-      const [debtorId, creditorId] = fromExpNet <= toExpNet
-        ? [s.fromUserId, s.toUserId]
-        : [s.toUserId, s.fromUserId];
-      // Cap at the expense-based debt so deleted expenses don't leave phantom balances
-      const debtAmount = Math.abs(Math.min(expenseOnlyNet.get(debtorId) ?? 0, 0));
-      const effectiveAmount = Math.min(amount, debtAmount);
+      const payerId = s.fromUserId;
+      const receiverId = s.toUserId;
+      const maxDebt = pairwiseOwed.get(payerId)?.get(receiverId) ?? 0;
+      const effectiveAmount = Math.min(amount, maxDebt);
       if (effectiveAmount > 0) {
-        net.set(debtorId, (net.get(debtorId) ?? 0) + effectiveAmount);
-        net.set(creditorId, (net.get(creditorId) ?? 0) - effectiveAmount);
+        net.set(payerId, (net.get(payerId) ?? 0) + effectiveAmount);
+        net.set(receiverId, (net.get(receiverId) ?? 0) - effectiveAmount);
       }
     }
 
