@@ -37,6 +37,13 @@ export class GroupsController {
     return this.groupsService.getMyGroups(user.id);
   }
 
+  // Must come before :id to avoid route clash
+  @UseGuards(JwtAuthGuard)
+  @Get('balance-overview')
+  async getBalanceOverview(@CurrentUser() user: AuthUser) {
+    return this.groupsService.getBalanceOverview(user.id);
+  }
+
   // Public route — must come before :id to avoid clash
   @Get('invite/:token/preview')
   async getInvitePreview(@Param('token') token: string) {

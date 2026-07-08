@@ -391,6 +391,37 @@ export class GroupsService {
     return { success: true };
   }
 
+  async getBalanceOverview(userId: string) {
+    const memberships = await this.prisma.groupMember.findMany({
+      where: { userId },
+      include: { group: { select: { baseCurrency: true } } },
+    });
+
+    const payable: Record<string, number> = {};
+    const receivable: Record<string, number> = {};
+
+    await Promise.all(
+      memberships.map(async (m) => {
+        const currency = m.group.baseCurrency;
+        const balancesData = await this.getBalances(userId, m.groupId);
+        const myBalance = balancesData.balances.find((b) => b.userId === userId);
+        if (!myBalance) return;
+        if (myBalance.amount < 0) {
+          payable[currency] = (payable[currency] ?? 0) + Math.abs(myBalance.amount);
+        } else if (myBalance.amount > 0) {
+          receivable[currency] = (receivable[currency] ?? 0) + myBalance.amount;
+        }
+      }),
+    );
+
+    for (const k of Object.keys(payable))
+      payable[k] = Math.round(payable[k] * 100) / 100;
+    for (const k of Object.keys(receivable))
+      receivable[k] = Math.round(receivable[k] * 100) / 100;
+
+    return { payable, receivable };
+  }
+
   async sendReminders(userId: string, groupId: string) {
     await this.assertMember(userId, groupId);
 
