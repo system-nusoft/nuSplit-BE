@@ -23,8 +23,23 @@ export interface UserSelect {
   name: string | null;
   phoneNumber: string | null;
   isVerified: boolean;
+  isPremium: boolean;
+  subscriptionStatus: string | null;
+  subscriptionCurrentPeriodEnd: Date | null;
   createdAt: Date;
 }
+
+const USER_PUBLIC_SELECT = {
+  id: true,
+  email: true,
+  name: true,
+  phoneNumber: true,
+  isVerified: true,
+  isPremium: true,
+  subscriptionStatus: true,
+  subscriptionCurrentPeriodEnd: true,
+  createdAt: true,
+} as const;
 
 @Injectable()
 export class AuthService {
@@ -83,7 +98,7 @@ export class AuthService {
       this.prisma.user.update({
         where: { id: user.id },
         data: { isVerified: true },
-        select: { id: true, email: true, name: true, phoneNumber: true, isVerified: true, createdAt: true },
+        select: USER_PUBLIC_SELECT,
       }),
       this.prisma.otpCode.deleteMany({ where: { userId: user.id } }),
     ]);
@@ -198,7 +213,7 @@ export class AuthService {
   async getMe(userId: string) {
     return this.prisma.user.findUniqueOrThrow({
       where: { id: userId },
-      select: { id: true, email: true, name: true, phoneNumber: true, isVerified: true, createdAt: true },
+      select: USER_PUBLIC_SELECT,
     });
   }
 

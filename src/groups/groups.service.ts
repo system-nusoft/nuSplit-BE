@@ -20,6 +20,9 @@ interface MemberInfo {
   phoneNumber: string | null;
 }
 
+// Free plan: users may create at most this many groups. Groups joined via invite don't count.
+const FREE_PLAN_GROUP_LIMIT = 1;
+
 @Injectable()
 export class GroupsService {
   constructor(
@@ -28,7 +31,35 @@ export class GroupsService {
     private readonly mailService: MailService,
   ) {}
 
+  /** Premium status can change any time via the Stripe webhook, so always read it fresh from the DB. */
+  private async isPremium(userId: string): Promise<boolean> {
+    const user = await this.prisma.user.findUnique({
+      where: { id: userId },
+      select: { isPremium: true },
+    });
+    return user?.isPremium ?? false;
+  }
+
+  private async assertPremium(userId: string, message: string): Promise<void> {
+    if (!(await this.isPremium(userId))) {
+      throw new ForbiddenException({ code: 'PREMIUM_REQUIRED', message });
+    }
+  }
+
   async createGroup(userId: string, dto: CreateGroupDto) {
+    if (!(await this.isPremium(userId))) {
+      const createdCount = await this.prisma.group.count({
+        where: { createdById: userId },
+      });
+      if (createdCount >= FREE_PLAN_GROUP_LIMIT) {
+        throw new ForbiddenException({
+          code: 'PREMIUM_REQUIRED',
+          message:
+            'The free plan is limited to 1 group. Upgrade to Premium for unlimited groups.',
+        });
+      }
+    }
+
     return this.prisma.$transaction(async (tx) => {
       const group = await tx.group.create({
         data: {
@@ -424,6 +455,10 @@ export class GroupsService {
 
   async sendReminders(userId: string, groupId: string) {
     await this.assertMember(userId, groupId);
+    await this.assertPremium(
+      userId,
+      'Payment reminders are a Premium feature. Upgrade to send WhatsApp and email nudges.',
+    );
 
     const group = await this.prisma.group.findUniqueOrThrow({
       where: { id: groupId },
@@ -461,6 +496,10 @@ export class GroupsService {
 
   async sendExpenseReminder(userId: string, groupId: string, expenseId: string) {
     await this.assertMember(userId, groupId);
+    await this.assertPremium(
+      userId,
+      'Payment reminders are a Premium feature. Upgrade to send WhatsApp and email nudges.',
+    );
 
     const expense = await this.prisma.expense.findFirst({
       where: { id: expenseId, groupId },

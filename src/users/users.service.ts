@@ -16,7 +16,17 @@ export class UsersService {
         ...(dto.name !== undefined && { name: dto.name }),
         ...(dto.phoneNumber !== undefined && { phoneNumber: dto.phoneNumber }),
       },
-      select: { id: true, email: true, name: true, phoneNumber: true, isVerified: true, createdAt: true },
+      select: {
+        id: true,
+        email: true,
+        name: true,
+        phoneNumber: true,
+        isVerified: true,
+        isPremium: true,
+        subscriptionStatus: true,
+        subscriptionCurrentPeriodEnd: true,
+        createdAt: true,
+      },
     });
   }
 }

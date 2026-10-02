@@ -15,8 +15,15 @@ model User {
   name         String?
   phoneNumber  String?
   isVerified   Boolean  @default(false)
+  isPremium    Boolean  @default(false)
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
+
+  stripeCustomerId             String?               @unique
+  stripeSubscriptionId         String?               @unique
+  subscriptionPlatform         SubscriptionPlatform?
+  subscriptionStatus           String?
+  subscriptionCurrentPeriodEnd DateTime?
 
   groups           GroupMember[]
   paidExpenses     Expense[]
@@ -142,6 +149,11 @@ model Comment {
   user      User     @relation(fields: [userId], references: [id])
   body      String
   createdAt DateTime @default(now())
+}
+
+enum SubscriptionPlatform {
+  STRIPE
+  REVENUECAT
 }
 
 enum SplitMethod {
